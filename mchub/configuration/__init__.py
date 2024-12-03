@@ -22,6 +22,11 @@ class ConfigurationSchema(Schema):
     dns_providers = fields.Dict()
     port = fields.Integer(load_default=5000)
     debug = fields.Boolean(load_default=True)
+    github_token = fields.Str()
+    github_organization = fields.Str()
+    tfcloud_api_token = fields.Str()
+    tfcloud_organization = fields.Str()
+    tfcloud_oauth_vcs_token_id = fields.Str()
 
     # validation
     #         if AuthType.TOKEN in data["auth_type"] and data.get("token", "") == "":
