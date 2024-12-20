@@ -39,7 +39,12 @@ An example `configuration.json` is shown below.
         "GCE_SERVICE_ACCOUNT_FILE": "/home/mcu/credentials/gcloud-key.json"
       }
     }
-  }
+  },
+  "github_token": "EXAMPLE_GITHUB_TOKEN",
+  "github_organization": "GithubOrganization",
+  "tfcloud_api_token": "EXAMPLE_TF_TOKEN",
+  "tfcloud_organization": "TFOrganization",
+  "tfcloud_oauth_vcs_token_id": "VCS_OAUTH_ID"
 }
 ```
 
@@ -133,3 +138,7 @@ The name of the Google Cloud managed zone.
 ### `dns_providers.gcloud.environment_variables`
 
 The environment variables required by Google Cloud refer to the path of the Google Cloud account's JSON key, which is always located in `/home/mcu/credentials/gcloud-key.json` in MC Hub. You don't need to modify this.
+
+### `tfcloud_oauth_vcs_token_id`
+TODO
+https://developer.hashicorp.com/terraform/cloud-docs/vcs
