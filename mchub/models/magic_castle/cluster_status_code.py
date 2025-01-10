@@ -7,26 +7,25 @@ class ClusterStatusCode(str, Enum):
     PLAN_RUNNING = "plan_running"
     PLAN_ERROR = "plan_error"
 
-    # TODO: Remove build
     BUILD_RUNNING = "build_running"
     BUILD_ERROR = "build_error"
 
     PROVISIONING_RUNNING = "provisioning_running"
     PROVISIONING_SUCCESS = "provisioning_success"
     PROVISIONING_ERROR = "provisioning_error"
+
     DESTROY_RUNNING = "destroy_running"
     DESTROY_ERROR = "destroy_error"
+    DESTROY_SUCCESS = "destroy_success"
+
     NOT_FOUND = "not_found"
 
     @staticmethod
-    def from_tfcloudstatus(tf_status: TFCloudStatusCode):
+    def from_tfcloudstatus(tf_status: TFCloudStatusCode, is_detroy: bool):
         """
         Those status are not supported with TFCloud
         ClusterStatusCode.BUILD_ERROR
-        ClusterStatusCode.BUILD_RUNNING
         ClusterStatusCode.PROVISIONING_ERROR
-        ClusterStatusCode.DESTROY_RUNNING
-        ClusterStatusCode.DESTROY_ERROR
         """
         match tf_status:
             case (
@@ -37,9 +36,9 @@ class ClusterStatusCode(str, Enum):
                 | TFCloudStatusCode.PRE_PLAN_COMPLETED
                 | TFCloudStatusCode.QUEUING
             ):
-                return ClusterStatusCode.CREATED
+                status = ClusterStatusCode.CREATED
             case TFCloudStatusCode.PLANNING | TFCloudStatusCode.PRE_PLAN_RUNNING:
-                return ClusterStatusCode.PLAN_RUNNING
+                status = ClusterStatusCode.PLAN_RUNNING
             case (
                 TFCloudStatusCode.DISCARDED
                 | TFCloudStatusCode.ERRORED
@@ -48,10 +47,10 @@ class ClusterStatusCode(str, Enum):
             ):
                 # TODO: When an error occur, we can fetch the plan and apply to know the corresponding step.
                 # For now, all errors are return as PLAN_ERROR
-                return ClusterStatusCode.PLAN_ERROR
+                status = ClusterStatusCode.PLAN_ERROR
             case (
-                TFCloudStatusCode.PLANNED_AND_FINISHED
-                | TFCloudStatusCode.PLANNED_AND_SAVED
+                TFCloudStatusCode.PLANNED_AND_SAVED
+                | TFCloudStatusCode.PLANNED
                 | TFCloudStatusCode.APPLY_QUEUED
                 | TFCloudStatusCode.APPLYING
                 | TFCloudStatusCode.COST_ESTIMATING
@@ -63,12 +62,26 @@ class ClusterStatusCode(str, Enum):
                 | TFCloudStatusCode.POST_PLAN_RUNNING
                 | TFCloudStatusCode.POST_PLAN_COMPLETED
             ):
-                return ClusterStatusCode.PROVISIONING_RUNNING
-            case TFCloudStatusCode.APPLIED:
-                return ClusterStatusCode.PROVISIONING_SUCCESS
+                status = ClusterStatusCode.BUILD_RUNNING
+            case TFCloudStatusCode.APPLIED | TFCloudStatusCode.PLANNED_AND_FINISHED:
+                status = ClusterStatusCode.PROVISIONING_RUNNING
 
             case TFCloudStatusCode.CONFIRMED:
                 raise NotImplementedError(f"TFCloud status is unsuported: {tf_status=}")
 
             case _:
-                return ClusterStatusCode.NOT_FOUND
+                status = ClusterStatusCode.NOT_FOUND
+
+        if is_detroy:
+            match status:
+                case (
+                    ClusterStatusCode.PLAN_RUNNING
+                    | ClusterStatusCode.BUILD_RUNNING
+                    | ClusterStatusCode.CREATED
+                ):
+                    status = ClusterStatusCode.DESTROY_RUNNING
+                case ClusterStatusCode.PROVISIONING_RUNNING:
+                    status = ClusterStatusCode.DESTROY_SUCCESS
+                case _:
+                    status = ClusterStatusCode.DESTROY_ERROR
+        return status
