@@ -142,3 +142,10 @@ The environment variables required by Google Cloud refer to the path of the Goog
 ### `tfcloud_oauth_vcs_token_id`
 TODO
 https://developer.hashicorp.com/terraform/cloud-docs/vcs
+
+### `github_token`
+TODO
+Github personal token (user)
+
+
+tfcloud_api_token = TEAM TOKEN for destroy
