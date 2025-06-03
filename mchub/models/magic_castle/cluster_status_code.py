@@ -72,7 +72,7 @@ class ClusterStatusCode(str, Enum):
             case _:
                 status = ClusterStatusCode.NOT_FOUND
 
-        if is_detroy:
+        if is_detroy:  # Extra step for destroy case
             match status:
                 case (
                     ClusterStatusCode.PLAN_RUNNING

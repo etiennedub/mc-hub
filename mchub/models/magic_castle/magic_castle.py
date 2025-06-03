@@ -11,14 +11,7 @@ from mchub.models.magic_castle.terraform_cloud_status import TFCloudStatusCode
 
 from ...configuration import get_config
 
-from requests.api import request
-
 import humanize
-
-from os import path, environ, mkdir, remove, scandir, rename, symlink
-from subprocess import run, CalledProcessError
-from shutil import rmtree
-from threading import Thread
 
 from marshmallow import ValidationError
 from sqlalchemy.sql import except_, func
@@ -423,7 +416,7 @@ class MagicCastle:
                     tf_status, is_destroy
                 )
 
-            # Is the run is completed, update the last run
+            # If the run is completed, update the last run
             if self.orm.status not in RUNNING_STATE:
                 print(f"Update last run: {run_id}")
                 self.orm.tfcloud_last_run = run_id
@@ -467,16 +460,9 @@ class MagicCastle:
         self.orm.plan = plan
 
     def get_progress(self):
-        if self.plan is None:
-            return None
-
-        try:
-            with open(path.join(self.path, TERRAFORM_APPLY_LOG_FILENAME), "r") as file:
-                terraform_output = file.read()
-        except FileNotFoundError:
-            # terraform apply was not launched yet, therefore the log file does not exist
-            terraform_output = ""
-        return TerraformPlanParser.get_done_changes(self.plan, terraform_output)
+        # TODO: Compare the Apply log with the plan with `TerraformPlanParser.get_done_changes`
+        # he plan log and apply are not fetch yet
+        return ""
 
     @property
     def state(self):
@@ -591,7 +577,8 @@ class MagicCastle:
         # and planning a change, some modifications may
         # only be reflected in the database and do not
         # require a plan.
-        if config_changed:
+        # Add an exception if the cluster is stuck in a destroy error
+        if config_changed or self.status == ClusterStatusCode.DESTROY_ERROR:
             try:
                 var_tf = self.config.get_var_tf()
                 github_storage.write(var_tf, self.hostname)
@@ -622,6 +609,5 @@ class MagicCastle:
         raise NotImplementedError
 
     def delete(self):
-        # TODO: Remove github repo + workspace
         db.session.delete(self.orm)
         db.session.commit()
