@@ -35,9 +35,9 @@ class ClusterStatusCode(str, Enum):
                 | TFCloudStatusCode.FETCHING_COMPLETED
                 | TFCloudStatusCode.PRE_PLAN_COMPLETED
                 | TFCloudStatusCode.QUEUING
+                | TFCloudStatusCode.PLANNING
+                | TFCloudStatusCode.PRE_PLAN_RUNNING
             ):
-                status = ClusterStatusCode.CREATED
-            case TFCloudStatusCode.PLANNING | TFCloudStatusCode.PRE_PLAN_RUNNING:
                 status = ClusterStatusCode.PLAN_RUNNING
             case (
                 TFCloudStatusCode.DISCARDED
@@ -52,7 +52,10 @@ class ClusterStatusCode(str, Enum):
                 TFCloudStatusCode.PLANNED_AND_SAVED
                 | TFCloudStatusCode.PLANNED
                 | TFCloudStatusCode.APPLY_QUEUED
-                | TFCloudStatusCode.APPLYING
+            ):
+                status = ClusterStatusCode.CREATED
+            case (
+                TFCloudStatusCode.APPLYING
                 | TFCloudStatusCode.COST_ESTIMATING
                 | TFCloudStatusCode.COST_ESTIMATED
                 | TFCloudStatusCode.POLICY_CHECKING

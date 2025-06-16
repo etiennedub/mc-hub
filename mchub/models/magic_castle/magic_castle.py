@@ -1,5 +1,6 @@
 import datetime
 import time
+from typing import Optional
 import requests
 import json
 import logging
@@ -148,13 +149,28 @@ class GithubStorage:
 github_storage = GithubStorage()
 
 
+class TerraformCloudRun(db.Model):
+    __tablename__ = "terraformcloudrun"
+    id = db.Column(db.Integer, primary_key=True)
+    run_id = db.Column(db.String(256))
+    plan = db.Column(db.PickleType())
+    apply_log_url = db.Column(db.String)
+    magic_castle = db.relationship("MagicCastleORM", back_populates="tfcloud_run")
+    magic_castle_id = db.Column(db.Integer, db.ForeignKey("magiccastle.id"))
+
+
 class MagicCastleORM(db.Model):
     __tablename__ = "magiccastle"
     id = db.Column(db.Integer, primary_key=True)
     hostname = db.Column(db.String(256), unique=True, nullable=False)
 
     tfcloud_workspace = db.Column(db.String(256))
-    tfcloud_last_run = db.Column(db.String(256))
+    tfcloud_run = db.relationship(
+        "TerraformCloudRun",
+        back_populates="magic_castle",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     status = db.Column(db.Enum(ClusterStatusCode), default=ClusterStatusCode.NOT_FOUND)
     created = db.Column(db.DateTime(), default=func.now())
@@ -162,7 +178,6 @@ class MagicCastleORM(db.Model):
     config = db.Column(db.PickleType())
     applied_config = db.Column(db.PickleType())
     tf_state = db.Column(db.PickleType())
-    plan = db.Column(db.PickleType())
     project_id = db.Column(db.Integer, db.ForeignKey("project.id"))
     project = db.relationship(
         "Project",
@@ -229,7 +244,7 @@ class TerraformCloud:
                     "auto-apply": "true",
                     "auto-apply-run-trigger": "true",
                     "file-triggers-enabled": "false",
-                    "queue-all-runs": "true",  # Must be set to true to trigger the first run automacticlly
+                    "queue-all-runs": "true",
                     "vcs-repo": {
                         "tags-regex": r"^apply-[a-f0-9]+$",
                         "identifier": repo_full_name,
@@ -253,7 +268,7 @@ class TerraformCloud:
             )
         return workspace_id
 
-    def get_last_run_status(self, workspace_id):
+    def get_lastest_run_status(self, workspace_id):
         url = f"{self.BASE_URL}/workspaces/{workspace_id}/runs"
         params = {
             "page[size]": 1,  # Limit to the most recent run
@@ -275,11 +290,55 @@ class TerraformCloud:
                 additional_details=f"{workspace_id=}, error: {res.text}",
             )
 
+    def get_run_apply_log(self, run_id) -> str:
+        url = f"{self.BASE_URL}/runs/{run_id}/apply"
+        res = self._request("GET", url)
+        if res.status_code == 200:
+            try:
+                return res.json()["data"]["attributes"]["log-read-url"]
 
-@cached(cache=TTLCache(maxsize=1024, ttl=30))
+            except IndexError:
+                raise TerraformCloudException(
+                    "Could not find log url",
+                    additional_details=f"{run_id=}, error: {res.text}",
+                )
+
+        else:
+            raise TerraformCloudException(
+                "Could not find apply run log",
+                additional_details=f"{run_id=}, error: {res.text}",
+            )
+
+    def get_run_plan_log_json(self, run_id) -> Optional[dict]:
+        url = f"{self.BASE_URL}/runs/{run_id}/plan"
+        res = self._request("GET", url)
+        if res.status_code == 200:
+            try:
+                is_finished = res.json()["data"]["attributes"]["status"] == "finished"
+                plan_id = res.json()["data"]["id"]
+
+                if is_finished:
+                    log_url = f"{self.BASE_URL}/plans/{plan_id}/json-output"
+                    return self._request("GET", log_url).json()
+                else:
+                    return None
+            except IndexError:
+                raise TerraformCloudException(
+                    "Could not find plan id",
+                    additional_details=f"{run_id=}, error: {res.text}",
+                )
+
+        else:
+            raise TerraformCloudException(
+                "Could not find apply log",
+                additional_details=f"{run_id=}, error: {res.text}",
+            )
+
+
+@cached(cache=TTLCache(maxsize=1024, ttl=10))
 def get_tf_status_cache(workspace_id):
     tf = TerraformCloud()
-    return tf.get_last_run_status(workspace_id)
+    return tf.get_lastest_run_status(workspace_id)
 
 
 class MagicCastle:
@@ -301,6 +360,7 @@ class MagicCastle:
             self.orm = MagicCastleORM(
                 status=ClusterStatusCode.NOT_FOUND,
                 config={},
+                tfcloud_run=TerraformCloudRun(),
             )
 
     @property
@@ -316,16 +376,8 @@ class MagicCastle:
         return self.orm.tfcloud_workspace
 
     @property
-    def tfcloud_last_run(self):
-        return self.orm.tfcloud_last_run
-
-    @property
-    def path(self):
-        return path.join(CLUSTERS_PATH, self.hostname)
-
-    @property
-    def main_file(self):
-        return path.join(self.path, MAIN_TERRAFORM_FILENAME)
+    def tfcloud_run(self):
+        return self.orm.tfcloud_run
 
     @property
     def cloud_id(self):
@@ -381,46 +433,42 @@ class MagicCastle:
 
     @property
     def status(self) -> ClusterStatusCode:
-        RUNNING_STATE = [
-            ClusterStatusCode.CREATED,
-            ClusterStatusCode.PLAN_RUNNING,
-            ClusterStatusCode.BUILD_RUNNING,
-            ClusterStatusCode.DESTROY_RUNNING,
-        ]
-
         # Update status from Terraform Cloud
-        if self.orm.status in RUNNING_STATE and self.orm.tfcloud_workspace is not None:
-            run_id, tf_status, is_destroy = get_tf_status_cache(
-                self.orm.tfcloud_workspace
-            )
-            print(
-                json.dumps(
-                    {
-                        "tf_status": tf_status,
-                        "is_destroy": is_destroy,
-                        "status": self.orm.status,
-                        "run_id": run_id,
-                        "tfcloud_last_run": self.orm.tfcloud_last_run,
-                    }
-                ),
-                flush=True,
-            )
+        run_id, tf_status, is_destroy = get_tf_status_cache(self.orm.tfcloud_workspace)
+        print(
+            json.dumps(
+                {
+                    "tf_status": tf_status,
+                    "is_destroy": is_destroy,
+                    "status": self.orm.status,
+                    "new_run_id": run_id,
+                    "run_id": self.orm.tfcloud_run.run_id,
+                }
+            ),
+            flush=True,
+        )
 
-            # Update the state only if the new run is started (assert that the state doesn't come from the last run)
-            if (
-                tf_status is not None
-                and is_destroy is not None
-                and run_id != self.orm.tfcloud_last_run
-            ):
-                self.status = ClusterStatusCode.from_tfcloudstatus(
-                    tf_status, is_destroy
-                )
+        # New run detected
+        if run_id != self.tfcloud_run.run_id:
+            self.orm.tfcloud_run = TerraformCloudRun(run_id=run_id)
 
-            # If the run is completed, update the last run
-            if self.orm.status not in RUNNING_STATE:
-                print(f"Update last run: {run_id}")
-                self.orm.tfcloud_last_run = run_id
-                db.session.commit()
+        # Update the state only if the new run is started
+        if tf_status is not None and is_destroy is not None:
+            self.status = ClusterStatusCode.from_tfcloudstatus(tf_status, is_destroy)
+
+        tf = TerraformCloud()
+        # Fetch lastest plan if currently empty
+        if not self.plan:
+            plan = tf.get_run_plan_log_json(run_id)
+            if plan is not None:
+                self.plan = plan
+                logging.info(f"Plan Updated for {run_id=}")
+
+        # Get the apply log
+        if self.plan and not self.apply_url:
+            apply_url = tf.get_run_apply_log(run_id)
+            logging.info(f"Update apply log for {run_id=}")
+            self.apply_url = apply_url
 
         if self.orm.status == ClusterStatusCode.PROVISIONING_RUNNING:
             now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -432,6 +480,7 @@ class MagicCastle:
             self.delete()
             return ClusterStatusCode.DESTROY_SUCCESS
 
+        db.session.commit()
         return self.orm.status
 
     @status.setter
@@ -453,16 +502,28 @@ class MagicCastle:
 
     @property
     def plan(self) -> dict:
-        return self.orm.plan
+        return self.orm.tfcloud_run.plan
 
     @plan.setter
     def plan(self, plan: dict):
-        self.orm.plan = plan
+        self.orm.tfcloud_run.plan = plan
+
+    @property
+    def apply_url(self) -> str:
+        return self.orm.tfcloud_run.apply_log_url
+
+    @apply_url.setter
+    def apply_url(self, apply_url: str):
+        self.orm.tfcloud_run.apply_log_url = apply_url
 
     def get_progress(self):
-        # TODO: Compare the Apply log with the plan with `TerraformPlanParser.get_done_changes`
-        # he plan log and apply are not fetch yet
-        return ""
+        if self.apply_url and self.plan:
+            res = requests.get(self.apply_url)
+            apply_log = ""
+            if res.status_code == 200:
+                apply_log = res.text
+
+            return TerraformPlanParser.get_done_changes(self.plan, apply_log)
 
     @property
     def state(self):
@@ -559,12 +620,12 @@ class MagicCastle:
         #
         self.orm.tfcloud_workspace = workspace_id
 
-        self.status = ClusterStatusCode.CREATED
-        self.orm.tfcloud_last_run = None
+        self.status = ClusterStatusCode.PLAN_RUNNING
         db.session.commit()
 
     def plan_modification(self, data):
         logging.debug(f"Call <{self.__class__.__name__}>:plan_modification")
+        print("modif")
 
         if not self.found:
             raise ClusterNotFoundException
@@ -599,6 +660,7 @@ class MagicCastle:
             f"{self.hostname}: Apply destroy on workspace_id={self.orm.tfcloud_workspace} with run_id={run_id}"
         )
         self.status = ClusterStatusCode.DESTROY_RUNNING
+        db.session.commit()
 
     def create_plan(self):
         logging.debug(f"Call <{self.__class__.__name__}:create_plan>")
@@ -606,7 +668,7 @@ class MagicCastle:
 
     def apply(self):
         logging.debug(f"Call <{self.__class__.__name__}:apply>")
-        raise NotImplementedError
+        # raise NotImplementedError
 
     def delete(self):
         db.session.delete(self.orm)
