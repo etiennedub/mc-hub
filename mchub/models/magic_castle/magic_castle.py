@@ -268,6 +268,29 @@ class TerraformCloud:
             )
         return workspace_id
 
+    def set_env_variable(self, workspace_id, name: str, value: str, sensitive=False):
+        url = f"{self.BASE_URL}/workspaces/{workspace_id}/vars"
+        payload = {
+            "data": {
+                "type": "vars",
+                "attributes": {
+                    "key": name,
+                    "value": value,
+                    "description": "",
+                    "category": "env",
+                    "hcl": False,
+                    "sensitive": sensitive,
+                },
+            }
+        }
+
+        res = self._request("POST", url, json=payload)
+        if res.status_code != 201:
+            raise TerraformCloudException(
+                "Could not set variable",
+                additional_details=f"{workspace_id=}, {name=}, {value=}, error: {res.text}",
+            )
+
     def get_lastest_run_status(self, workspace_id):
         url = f"{self.BASE_URL}/workspaces/{workspace_id}/runs"
         params = {
@@ -434,19 +457,13 @@ class MagicCastle:
     @property
     def status(self) -> ClusterStatusCode:
         # Update status from Terraform Cloud
-        run_id, tf_status, is_destroy = get_tf_status_cache(self.orm.tfcloud_workspace)
-        print(
-            json.dumps(
-                {
-                    "tf_status": tf_status,
-                    "is_destroy": is_destroy,
-                    "status": self.orm.status,
-                    "new_run_id": run_id,
-                    "run_id": self.orm.tfcloud_run.run_id,
-                }
-            ),
-            flush=True,
-        )
+        try:
+            run_id, tf_status, is_destroy = get_tf_status_cache(
+                self.orm.tfcloud_workspace
+            )
+        except TerraformCloudException as e:
+            logging.error(f"Error on {self.orm.tfcloud_workspace}, error={e.message}")
+            return self.orm.status
 
         # New run detected
         if run_id != self.tfcloud_run.run_id:
@@ -598,6 +615,10 @@ class MagicCastle:
 
         tf = TerraformCloud()
         workspace_id = tf.create_workspace(workspace_name, github_repo_fullname)
+
+        for k, v in self.project.env.items():
+            sensitive = True if "SECRET" in k else False
+            tf.set_env_variable(workspace_id, k, v, sensitive=sensitive)
 
         logging.info(
             f"{self.hostname}: terraformcloud workspace=<{workspace_id}> created"
