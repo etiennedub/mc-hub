@@ -156,7 +156,6 @@ class MagicCastle:
         return self.orm.applied_config
 
     def set_configuration(self, configuration: dict):
-        print("set config")
         logging.debug(f"Call <{self.__class__.__name__}>:set_configuration")
 
         expect_tf_changes = False
@@ -370,7 +369,6 @@ class MagicCastle:
 
     def plan_modification(self, data):
         logging.debug(f"Call <{self.__class__.__name__}>:plan_modification")
-        print("modif")
 
         if not self.found:
             raise ClusterNotFoundException

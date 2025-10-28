@@ -36,7 +36,6 @@ class GithubStorage:
         try:
             repo = org.get_repo(repo_name)
         except Exception as err:
-            print(err)
             # Repository does not exist, create it
             repo = org.create_repo_from_template(
                 name=repo_name,
@@ -79,7 +78,6 @@ class GithubStorage:
                 sha=file.sha,  # Required for updating
             )
         except Exception as err:
-            print(type(err))
             # Create the file if it does not exist
             commit = repo.create_file(
                 path=filename,
