@@ -1,16 +1,9 @@
 import datetime
 import time
-from typing import Optional
 import requests
 import json
 import logging
 from cachetools import cached, TTLCache
-
-from mchub.models.magic_castle.terraform_cloud_status import TFCloudStatusCode
-
-# logging.basicConfig(level=logging.DEBUG)
-
-from ...configuration import get_config
 
 import humanize
 
@@ -20,13 +13,10 @@ from sqlalchemy.exc import IntegrityError
 
 from mchub.models.cloud.cloud_manager import CloudManager
 
-from github import Github
-from github import Auth
-from github import GithubException
-
 from .magic_castle_configuration import MagicCastleConfiguration
 from .cluster_status_code import ClusterStatusCode
 
+from ..terraform_cloud import TerraformCloudRunORM
 from ..terraform.terraform_state import TerraformState
 from ..terraform.terraform_plan_parser import TerraformPlanParser
 from ..cloud.dns_manager import DnsManager
@@ -54,109 +44,13 @@ from ...exceptions.server_exception import (
 
 from ...database import db
 
+from ...services.terraform_cloud_api import get_terraform_cloud
+from ...services.github_api import get_github_storage
+
 
 TERRAFORM_PLAN_BINARY_FILENAME = "terraform_plan"
 TERRAFORM_APPLY_LOG_FILENAME = "terraform_apply.log"
 TERRAFORM_PLAN_LOG_FILENAME = "terraform_plan.log"
-
-
-class GithubStorage:
-    def __init__(self):
-        config = get_config()
-        self.organization = config["github_organization"]
-        template_name = config["github_template"]
-
-        auth = Auth.Token(config["github_token"])
-        self.github = Github(auth=auth)
-
-        org = self.github.get_organization(self.organization)
-        self.template_repo = org.get_repo(template_name)
-
-    def _get_repo_name(self, hostname):
-        import hashlib
-
-        hash_object = hashlib.sha256(hostname.encode())
-        hashed_name = hash_object.hexdigest()[:10]
-        repo_name = f"mchub-{hashed_name}"
-        return repo_name
-
-    def create_repo(self, hostname):
-        repo_name = self._get_repo_name(hostname)
-
-        repo_description = f"mchub repo for unique_name '{hostname}'"
-
-        org = self.github.get_organization(self.organization)
-
-        try:
-            repo = org.get_repo(repo_name)
-        except Exception as err:
-            print(err)
-            # Repository does not exist, create it
-            repo = org.create_repo_from_template(
-                name=repo_name,
-                repo=self.template_repo,
-                description=repo_description,
-                private=True,
-            )
-
-            # Wait for the repo to apply the commits from the template.
-            # Otherwise, we might have a issue with commit order.
-            commits = repo.get_commits()
-            nb_commits = 0
-            while nb_commits < 1:
-                try:
-                    nb_commits = commits.totalCount
-                except GithubException as e:
-                    # Skip for no commit error
-                    if e.status != 409:
-                        raise e
-
-                time.sleep(1)
-
-        return f"{self.organization}/{repo_name}"
-
-    def write(self, tf_data, hostname, filename="terraform.tfvars.json"):
-        # Check if the file exists in the repository
-        repo_name = self._get_repo_name(hostname)
-        org = self.github.get_organization(self.organization)
-        repo = org.get_repo(repo_name)
-
-        tf_str = json.dumps(tf_data)
-
-        try:
-            file = repo.get_contents(filename)
-            # Update the file if it exists
-            commit = repo.update_file(
-                path=file.path,
-                message=f"Update {filename} content",
-                content=tf_str,
-                sha=file.sha,  # Required for updating
-            )
-        except Exception as err:
-            print(type(err))
-            # Create the file if it does not exist
-            commit = repo.create_file(
-                path=filename,
-                message=f"Add initial {filename}",
-                content=tf_str,
-            )
-
-        sha = commit["commit"].sha
-        repo.create_git_ref(ref=f"refs/tags/apply-{sha[:10]}", sha=sha)
-        return sha
-
-
-github_storage = GithubStorage()
-
-
-class TerraformCloudRun(db.Model):
-    __tablename__ = "terraformcloudrun"
-    id = db.Column(db.Integer, primary_key=True)
-    run_id = db.Column(db.String(256))
-    plan = db.Column(db.PickleType())
-    apply_log_url = db.Column(db.String)
-    magic_castle = db.relationship("MagicCastleORM", back_populates="tfcloud_run")
-    magic_castle_id = db.Column(db.Integer, db.ForeignKey("magiccastle.id"))
 
 
 class MagicCastleORM(db.Model):
@@ -166,7 +60,7 @@ class MagicCastleORM(db.Model):
 
     tfcloud_workspace = db.Column(db.String(256))
     tfcloud_run = db.relationship(
-        "TerraformCloudRun",
+        "TerraformCloudRunORM",
         back_populates="magic_castle",
         cascade="all, delete-orphan",
         uselist=False,
@@ -187,180 +81,9 @@ class MagicCastleORM(db.Model):
     )
 
 
-class TerraformCloud:
-    BASE_URL = "https://app.terraform.io/api/v2"
-
-    def __init__(self) -> None:
-        config = get_config()
-
-        self.organisation_name = config["tfcloud_organization"]
-        self.oauth_token_id = config["tfcloud_oauth_vcs_token_id"]
-
-        self.headers = {
-            "Authorization": f"Bearer {config['tfcloud_api_token']}",
-            "Content-Type": "application/vnd.api+json",
-        }
-
-        self.workspace_url = (
-            f"{self.BASE_URL}/organizations/{self.organisation_name}/workspaces"
-        )
-
-        self.runs_url = f"{self.BASE_URL}/runs"
-
-    def _request(self, method, url, **kwargs):
-        return requests.request(method, url, headers=self.headers, **kwargs)
-
-    def destroy_run(self, workspace_id):
-        destroy_payload = {
-            "data": {
-                "attributes": {"message": "Apply destroy", "is-destroy": True},
-                "type": "runs",
-                "relationships": {
-                    "workspace": {
-                        "data": {"type": "workspaces", "id": f"{workspace_id}"}
-                    },
-                },
-            }
-        }
-
-        response = self._request("POST", self.runs_url, json=destroy_payload)
-
-        try:
-            run_id = response.json()["data"]["id"]
-        except Exception:
-            raise TerraformCloudException(
-                "Could not destroy workspace",
-                additional_details=f"{workspace_id=}, error: {response.text}",
-            )
-        return run_id
-
-    def create_workspace(self, workspace_name, repo_full_name):
-        workspace_payload = {
-            "data": {
-                "type": "workspaces",
-                "attributes": {
-                    "name": workspace_name,
-                    "execution-mode": "remote",
-                    "auto-apply": "true",
-                    "auto-apply-run-trigger": "true",
-                    "file-triggers-enabled": "false",
-                    "queue-all-runs": "true",
-                    "vcs-repo": {
-                        "tags-regex": r"^apply-[a-f0-9]+$",
-                        "identifier": repo_full_name,
-                        "oauth-token-id": self.oauth_token_id,
-                        "branch": "main",
-                        "default-branch": True,
-                    },
-                },
-            }
-        }
-
-        response = self._request("POST", self.workspace_url, json=workspace_payload)
-
-        try:
-            workspace_id = response.json()["data"]["id"]
-        except Exception:
-            # TODO No error in UI (show Not Found)
-            raise TerraformCloudException(
-                "Could not create workspace",
-                additional_details=f"{workspace_name=}, error: {response.text}",
-            )
-        return workspace_id
-
-    def set_env_variable(self, workspace_id, name: str, value: str, sensitive=False):
-        url = f"{self.BASE_URL}/workspaces/{workspace_id}/vars"
-        payload = {
-            "data": {
-                "type": "vars",
-                "attributes": {
-                    "key": name,
-                    "value": value,
-                    "description": "",
-                    "category": "env",
-                    "hcl": False,
-                    "sensitive": sensitive,
-                },
-            }
-        }
-
-        res = self._request("POST", url, json=payload)
-        if res.status_code != 201:
-            raise TerraformCloudException(
-                "Could not set variable",
-                additional_details=f"{workspace_id=}, {name=}, {value=}, error: {res.text}",
-            )
-
-    def get_lastest_run_status(self, workspace_id):
-        url = f"{self.BASE_URL}/workspaces/{workspace_id}/runs"
-        params = {
-            "page[size]": 1,  # Limit to the most recent run
-        }
-        res = self._request("GET", url, params=params)
-        if res.status_code == 200:
-            try:
-                status = res.json()["data"][0]["attributes"]["status"]
-                is_detroy = res.json()["data"][0]["attributes"]["is-destroy"]
-                run_id = res.json()["data"][0]["id"]
-                return run_id, TFCloudStatusCode(status), is_detroy
-            except IndexError:
-                # No run found
-                return None, None, None
-
-        else:
-            raise TerraformCloudException(
-                "Could not find trigger run",
-                additional_details=f"{workspace_id=}, error: {res.text}",
-            )
-
-    def get_run_apply_log(self, run_id) -> str:
-        url = f"{self.BASE_URL}/runs/{run_id}/apply"
-        res = self._request("GET", url)
-        if res.status_code == 200:
-            try:
-                return res.json()["data"]["attributes"]["log-read-url"]
-
-            except IndexError:
-                raise TerraformCloudException(
-                    "Could not find log url",
-                    additional_details=f"{run_id=}, error: {res.text}",
-                )
-
-        else:
-            raise TerraformCloudException(
-                "Could not find apply run log",
-                additional_details=f"{run_id=}, error: {res.text}",
-            )
-
-    def get_run_plan_log_json(self, run_id) -> Optional[dict]:
-        url = f"{self.BASE_URL}/runs/{run_id}/plan"
-        res = self._request("GET", url)
-        if res.status_code == 200:
-            try:
-                is_finished = res.json()["data"]["attributes"]["status"] == "finished"
-                plan_id = res.json()["data"]["id"]
-
-                if is_finished:
-                    log_url = f"{self.BASE_URL}/plans/{plan_id}/json-output"
-                    return self._request("GET", log_url).json()
-                else:
-                    return None
-            except IndexError:
-                raise TerraformCloudException(
-                    "Could not find plan id",
-                    additional_details=f"{run_id=}, error: {res.text}",
-                )
-
-        else:
-            raise TerraformCloudException(
-                "Could not find apply log",
-                additional_details=f"{run_id=}, error: {res.text}",
-            )
-
-
 @cached(cache=TTLCache(maxsize=1024, ttl=10))
 def get_tf_status_cache(workspace_id):
-    tf = TerraformCloud()
+    tf = get_terraform_cloud()
     return tf.get_lastest_run_status(workspace_id)
 
 
@@ -383,7 +106,7 @@ class MagicCastle:
             self.orm = MagicCastleORM(
                 status=ClusterStatusCode.NOT_FOUND,
                 config={},
-                tfcloud_run=TerraformCloudRun(),
+                tfcloud_run=TerraformCloudRunORM(),
             )
 
     @property
@@ -433,6 +156,7 @@ class MagicCastle:
         return self.orm.applied_config
 
     def set_configuration(self, configuration: dict):
+        print("set config")
         logging.debug(f"Call <{self.__class__.__name__}>:set_configuration")
 
         expect_tf_changes = False
@@ -467,13 +191,13 @@ class MagicCastle:
 
         # New run detected
         if run_id != self.tfcloud_run.run_id:
-            self.orm.tfcloud_run = TerraformCloudRun(run_id=run_id)
+            self.orm.tfcloud_run = TerraformCloudRunORM(run_id=run_id)
 
         # Update the state only if the new run is started
         if tf_status is not None and is_destroy is not None:
             self.status = ClusterStatusCode.from_tfcloudstatus(tf_status, is_destroy)
 
-        tf = TerraformCloud()
+        tf = get_terraform_cloud()
         # Fetch lastest plan if currently empty
         if not self.plan:
             plan = tf.get_run_plan_log_json(run_id)
@@ -609,16 +333,16 @@ class MagicCastle:
         except IntegrityError:
             raise ClusterExistsException
 
-        github_repo_fullname = github_storage.create_repo(self.hostname)
+        github_repo_fullname = get_github_storage().create_repo(
+            self.hostname, self.project.github_template
+        )
 
         workspace_name = github_repo_fullname.split("/")[-1]
 
-        tf = TerraformCloud()
-        workspace_id = tf.create_workspace(workspace_name, github_repo_fullname)
-
-        for k, v in self.project.env.items():
-            sensitive = True if "SECRET" in k else False
-            tf.set_env_variable(workspace_id, k, v, sensitive=sensitive)
+        tf = get_terraform_cloud()
+        workspace_id = tf.create_workspace(
+            workspace_name, github_repo_fullname, self.orm.project.tfcloud_project_id
+        )
 
         logging.info(
             f"{self.hostname}: terraformcloud workspace=<{workspace_id}> created"
@@ -627,7 +351,7 @@ class MagicCastle:
         # Write the main terraform file to storage backend
         try:
             var_tf = self.config.get_var_tf()
-            github_commit = github_storage.write(var_tf, self.hostname)
+            github_commit = get_github_storage().write(var_tf, self.hostname)
         except Exception as error:
             self.delete()
             raise PlanException(
@@ -663,7 +387,7 @@ class MagicCastle:
         if config_changed or self.status == ClusterStatusCode.DESTROY_ERROR:
             try:
                 var_tf = self.config.get_var_tf()
-                github_storage.write(var_tf, self.hostname)
+                get_github_storage().write(var_tf, self.hostname)
             except Exception as error:
                 self.delete()
                 raise PlanException(
@@ -675,7 +399,7 @@ class MagicCastle:
 
     def plan_destruction(self):
         logging.debug(f"Call <{self.__class__.__name__}:plan_destruction>")
-        tf = TerraformCloud()
+        tf = get_terraform_cloud()
         run_id = tf.destroy_run(self.orm.tfcloud_workspace)
         logging.info(
             f"{self.hostname}: Apply destroy on workspace_id={self.orm.tfcloud_workspace} with run_id={run_id}"

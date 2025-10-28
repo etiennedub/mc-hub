@@ -50,7 +50,6 @@ class MagicCastleAPI(ApiView):
             return {}
 
     def put(self, user: User, hostname):
-        print("PUT")
         orm = db.session.execute(
             db.select(MagicCastleORM).filter_by(hostname=hostname)
         ).scalar_one_or_none()
