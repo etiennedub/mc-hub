@@ -77,7 +77,8 @@ EXISTING_CLUSTER_STATE = {
     "public_keys": ["ssh-rsa FAKE"],
     "status": "provisioning_success",
     "hostname": "valid1.magic-castle.cloud",
-    "freeipa_passwd": "FAKE",
+    # "freeipa_passwd": "FAKE",
+    "freeipa_passwd": None,  # TODO: Check if needed
     "expiration_date": "2029-01-01",
     "age": "a moment",
 }
@@ -339,7 +340,8 @@ CLUSTERS = {
         "expiration_date": "2029-01-01",
         "hostname": "valid1.magic-castle.cloud",
         "status": "provisioning_success",
-        "freeipa_passwd": "FAKE",
+        # "freeipa_passwd": "FAKE",
+        "freeipa_passwd": None,  # TODO: Check if needed
         "age": "a moment",
     },
     "empty-state.magic-castle.cloud": {
@@ -366,7 +368,8 @@ CLUSTERS = {
         "hostname": "missingnodes.mc.ca",
         "expiration_date": "2029-01-01",
         "status": "build_error",
-        "freeipa_passwd": "FAKE",
+        # "freeipa_passwd": "FAKE",
+        "freeipa_passwd": None,  # TODO: Check if needed
         "age": "a moment",
     },
     "noowner.magic-castle.cloud": {
@@ -375,7 +378,8 @@ CLUSTERS = {
         "hostname": "noowner.magic-castle.cloud",
         "expiration_date": "2029-01-01",
         "status": "provisioning_success",
-        "freeipa_passwd": "FAKE",
+        # "freeipa_passwd": "FAKE",
+        "freeipa_passwd": None,  # TODO: Check if needed
         "age": "a moment",
     },
 }

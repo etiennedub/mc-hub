@@ -1,5 +1,4 @@
 import datetime
-import time
 import requests
 import json
 import logging
@@ -17,7 +16,6 @@ from .magic_castle_configuration import MagicCastleConfiguration
 from .cluster_status_code import ClusterStatusCode
 
 from ..terraform_cloud import TerraformCloudRunORM
-from ..terraform.terraform_state import TerraformState
 from ..terraform.terraform_plan_parser import TerraformPlanParser
 from ..cloud.dns_manager import DnsManager
 from ..cloud.project import Project
@@ -71,7 +69,7 @@ class MagicCastleORM(db.Model):
     expiration_date = db.Column(db.String(32))
     config = db.Column(db.PickleType())
     applied_config = db.Column(db.PickleType())
-    tf_state = db.Column(db.PickleType())
+    tf_state = db.Column(db.PickleType())  # TODO: Unused
     project_id = db.Column(db.Integer, db.ForeignKey("project.id"))
     project = db.relationship(
         "Project",
@@ -228,17 +226,6 @@ class MagicCastle:
         if status != self.orm.status:
             self.orm.status = status
             db.session.commit()
-
-            # Log cluster status updates for log analytics
-            print(
-                json.dumps(
-                    {
-                        "hostname": self.hostname,
-                        "status": self.orm.status,
-                    }
-                ),
-                flush=True,
-            )
 
     @property
     def plan(self) -> dict:
@@ -408,10 +395,6 @@ class MagicCastle:
     def create_plan(self):
         logging.debug(f"Call <{self.__class__.__name__}:create_plan>")
         raise NotImplementedError
-
-    def apply(self):
-        logging.debug(f"Call <{self.__class__.__name__}:apply>")
-        # raise NotImplementedError
 
     def delete(self):
         db.session.delete(self.orm)

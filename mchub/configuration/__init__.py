@@ -3,6 +3,7 @@ import logging
 import sys
 
 from os import path
+from typing import Optional
 
 from marshmallow import Schema, fields, ValidationError, post_load
 
@@ -42,7 +43,7 @@ def load_config():
     config_path = path.join(CONFIGURATION_FILE_PATH, CONFIGURATION_FILENAME)
     try:
         with open(config_path) as configuration_file:
-            config = json.load(configuration_file)
+            config_json = json.load(configuration_file)
     except FileNotFoundError as error:
         logging.error(
             f"Could not find {CONFIGURATION_FILENAME} in {CONFIGURATION_FILE_PATH}"
@@ -50,7 +51,7 @@ def load_config():
         raise error
 
     try:
-        config = ConfigurationSchema().load(config)
+        config = ConfigurationSchema().load(config_json)
     except ValidationError as error:
         logging.error(
             f"Configuration file {CONFIGURATION_FILENAME} is invalid - {error}"
@@ -62,7 +63,7 @@ def load_config():
 _config = None
 
 
-def get_config():
+def get_config() -> ConfigurationSchema:
     global _config
     if _config is None:
         _config = load_config()
