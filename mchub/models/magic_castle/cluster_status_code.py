@@ -1,3 +1,4 @@
+from __future__ import annotations
 from enum import Enum
 from .terraform_cloud_status import TFCloudStatusCode
 
@@ -88,3 +89,11 @@ class ClusterStatusCode(str, Enum):
                 case _:
                     status = ClusterStatusCode.DESTROY_ERROR
         return status
+
+    @staticmethod
+    def is_provisioning(current_status: ClusterStatusCode):
+        return current_status in [
+            ClusterStatusCode.PROVISIONING_RUNNING,
+            ClusterStatusCode.PROVISIONING_SUCCESS,
+            ClusterStatusCode.PROVISIONING_ERROR,
+        ]

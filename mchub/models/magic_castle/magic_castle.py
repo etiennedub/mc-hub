@@ -17,6 +17,7 @@ from .cluster_status_code import ClusterStatusCode
 
 from ..terraform_cloud import TerraformCloudRunORM
 from ..terraform.terraform_plan_parser import TerraformPlanParser
+from ..terraform.terraform_state import TerraformState
 from ..cloud.dns_manager import DnsManager
 from ..cloud.project import Project
 from ..puppet.provisioning_manager import ProvisioningManager, MAX_PROVISIONING_TIME
@@ -69,7 +70,6 @@ class MagicCastleORM(db.Model):
     expiration_date = db.Column(db.String(32))
     config = db.Column(db.PickleType())
     applied_config = db.Column(db.PickleType())
-    tf_state = db.Column(db.PickleType())  # TODO: Unused
     project_id = db.Column(db.Integer, db.ForeignKey("project.id"))
     project = db.relationship(
         "Project",
@@ -175,8 +175,11 @@ class MagicCastle:
             expect_tf_changes = True
         return expect_tf_changes
 
-    @property
-    def status(self) -> ClusterStatusCode:
+    def _update_status_from_tf_cloud(self):
+        """
+        Fetch all the updates from the Terraform Cloud api.
+        This update the status, plan, apply log and tf_state
+        """
         # Update status from Terraform Cloud
         try:
             run_id, tf_status, is_destroy = get_tf_status_cache(
@@ -208,6 +211,17 @@ class MagicCastle:
             logging.info(f"Update apply log for {run_id=}")
             self.apply_url = apply_url
 
+        # Get the tf state
+        if self.tf_state is None and ClusterStatusCode.is_provisioning(self.orm.status):
+            tf_state = tf.get_tf_state(self.orm.tfcloud_workspace)
+            if tf_state is not None:
+                self.tf_state = TerraformState(tf_state)
+                logging.info(f"Update tf_state {run_id=}")
+
+    @property
+    def status(self) -> ClusterStatusCode:
+        self._update_status_from_tf_cloud()
+
         if self.orm.status == ClusterStatusCode.PROVISIONING_RUNNING:
             now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             if ProvisioningManager.check_online(self.hostname):
@@ -234,6 +248,14 @@ class MagicCastle:
     @plan.setter
     def plan(self, plan: dict):
         self.orm.tfcloud_run.plan = plan
+
+    @property
+    def tf_state(self) -> TerraformState:
+        return self.orm.tfcloud_run.tf_state
+
+    @tf_state.setter
+    def tf_state(self, tf_state: TerraformState):
+        self.orm.tfcloud_run.tf_state = tf_state
 
     @property
     def apply_url(self) -> str:
@@ -263,10 +285,6 @@ class MagicCastle:
             "expiration_date": self.expiration_date,
             "cloud": {"name": self.project.name, "id": self.project.id},
         }
-
-    @property
-    def tf_state(self):
-        return self.orm.tf_state
 
     @property
     def freeipa_passwd(self):

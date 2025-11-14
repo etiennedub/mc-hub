@@ -241,6 +241,32 @@ class TerraformCloud:
                 additional_details=f"{run_id=}, error: {res.text}",
             )
 
+    def get_tf_state(self, workspace_id) -> Optional[dict]:
+        url = f"{self.BASE_URL}/workspaces/{workspace_id}/current-state-version"
+        res = self._request("GET", url)
+        if res.status_code == 200:
+            try:
+                is_finished = res.json()["data"]["attributes"]["status"] == "finalized"
+
+                if is_finished:
+                    state_url = res.json()["data"]["attributes"][
+                        "hosted-state-download-url"
+                    ]
+                    return self._request("GET", state_url).json()
+                else:
+                    return None
+            except IndexError:
+                raise TerraformCloudException(
+                    "Could not find tf state",
+                    additional_details=f"{workspace_id=}, error: {res.text}",
+                )
+
+        else:
+            raise TerraformCloudException(
+                "Invalid workspace to retrive state",
+                additional_details=f"{workspace_id=}, error: {res.text}",
+            )
+
 
 _terraform_cloud_instance = None
 
