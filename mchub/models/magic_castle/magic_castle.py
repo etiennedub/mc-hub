@@ -366,7 +366,6 @@ class MagicCastle:
             f"{self.hostname}: New commit <{github_commit}> on repo <{github_repo_fullname}>"
         )
 
-        #
         self.orm.tfcloud_workspace = workspace_id
 
         self.status = ClusterStatusCode.PLAN_RUNNING

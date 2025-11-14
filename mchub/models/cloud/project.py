@@ -30,6 +30,7 @@ class Project(db.Model):
         "MagicCastleORM",
         back_populates="project",
         cascade_backrefs=False,
+        cascade="all, delete-orphan",
     )
 
 
