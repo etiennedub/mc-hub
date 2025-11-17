@@ -1,4 +1,6 @@
+import time
 import datetime
+import github
 import requests
 import json
 import logging
@@ -11,6 +13,7 @@ from sqlalchemy.sql import except_, func
 from sqlalchemy.exc import IntegrityError
 
 from mchub.models.cloud.cloud_manager import CloudManager
+from mchub.models.magic_castle.terraform_cloud_status import TFCloudStatusCode
 
 from .magic_castle_configuration import MagicCastleConfiguration
 from .cluster_status_code import ClusterStatusCode
@@ -32,9 +35,11 @@ from ...configuration.env import CLUSTERS_PATH
 from ...exceptions.invalid_usage_exception import (
     ClusterNotFoundException,
     ClusterExistsException,
+    InvalidPlanParameters,
     InvalidUsageException,
     BusyClusterException,
     PlanNotCreatedException,
+    RunIDNotSet,
 )
 from ...exceptions.server_exception import (
     PlanException,
@@ -80,9 +85,9 @@ class MagicCastleORM(db.Model):
 
 
 @cached(cache=TTLCache(maxsize=1024, ttl=10))
-def get_tf_status_cache(workspace_id):
+def get_tf_status_cache(run_id):
     tf = get_terraform_cloud()
-    return tf.get_lastest_run_status(workspace_id)
+    return tf.get_run_status(run_id)
 
 
 class MagicCastle:
@@ -177,46 +182,41 @@ class MagicCastle:
 
     def _update_status_from_tf_cloud(self):
         """
-        Fetch all the updates from the Terraform Cloud api.
+        Fetch all the updates from the Terraform Cloud api if the run_id is started,
+        otherwise get status from db.
         This update the status, plan, apply log and tf_state
         """
-        # Update status from Terraform Cloud
-        try:
-            run_id, tf_status, is_destroy = get_tf_status_cache(
-                self.orm.tfcloud_workspace
-            )
-        except TerraformCloudException as e:
-            logging.error(f"Error on {self.orm.tfcloud_workspace}, error={e.message}")
-            return self.orm.status
+        if self.tfcloud_run.run_id:
+            # Update status from Terraform Cloud
+            try:
+                tf_status, is_destroy = get_tf_status_cache(self.tfcloud_run.run_id)
+            except TerraformCloudException as e:
+                logging.error(
+                    f"Error on {self.orm.tfcloud_workspace}, error={e.message}"
+                )
+                return self.orm.status
 
-        # New run detected
-        if run_id != self.tfcloud_run.run_id:
-            self.orm.tfcloud_run = TerraformCloudRunORM(run_id=run_id)
+            if tf_status is not None and is_destroy is not None:
+                self.status = ClusterStatusCode.from_tfcloudstatus(
+                    tf_status, is_destroy
+                )
 
-        # Update the state only if the new run is started
-        if tf_status is not None and is_destroy is not None:
-            self.status = ClusterStatusCode.from_tfcloudstatus(tf_status, is_destroy)
+            # Fetch the apply_log
+            if self.plan and not self.apply_url:
+                tf = get_terraform_cloud()
+                apply_url = tf.get_run_apply_log(self.tfcloud_run.run_id)
+                logging.info(f"Update apply log for {self.tfcloud_run.run_id=}")
+                self.apply_url = apply_url
 
-        tf = get_terraform_cloud()
-        # Fetch lastest plan if currently empty
-        if not self.plan:
-            plan = tf.get_run_plan_log_json(run_id)
-            if plan is not None:
-                self.plan = plan
-                logging.info(f"Plan Updated for {run_id=}")
-
-        # Get the apply log
-        if self.plan and not self.apply_url:
-            apply_url = tf.get_run_apply_log(run_id)
-            logging.info(f"Update apply log for {run_id=}")
-            self.apply_url = apply_url
-
-        # Get the tf state
-        if self.tf_state is None and ClusterStatusCode.is_provisioning(self.orm.status):
-            tf_state = tf.get_tf_state(self.orm.tfcloud_workspace)
-            if tf_state is not None:
-                self.tf_state = TerraformState(tf_state)
-                logging.info(f"Update tf_state {run_id=}")
+            # Fetch the tf state
+            if self.tf_state is None and ClusterStatusCode.is_provisioning(
+                self.orm.status
+            ):
+                tf = get_terraform_cloud()
+                tf_state = tf.get_tf_state(self.orm.tfcloud_workspace)
+                if tf_state is not None:
+                    self.tf_state = TerraformState(tf_state)
+                    logging.info(f"Update tf_state {self.tfcloud_run.run_id=}")
 
     @property
     def status(self) -> ClusterStatusCode:
@@ -241,6 +241,10 @@ class MagicCastle:
             self.orm.status = status
             db.session.commit()
 
+    @tfcloud_run.setter
+    def tfcloud_run(self, tfcloud_run: TerraformCloudRunORM):
+        self.orm.tfcloud_run = tfcloud_run
+
     @property
     def plan(self) -> dict:
         return self.orm.tfcloud_run.plan
@@ -248,6 +252,7 @@ class MagicCastle:
     @plan.setter
     def plan(self, plan: dict):
         self.orm.tfcloud_run.plan = plan
+        db.session.commit()
 
     @property
     def tf_state(self) -> TerraformState:
@@ -368,7 +373,7 @@ class MagicCastle:
 
         self.orm.tfcloud_workspace = workspace_id
 
-        self.status = ClusterStatusCode.PLAN_RUNNING
+        self.create_plan(github_sha=github_commit)
         db.session.commit()
 
     def plan_modification(self, data):
@@ -389,30 +394,68 @@ class MagicCastle:
         if config_changed or self.status == ClusterStatusCode.DESTROY_ERROR:
             try:
                 var_tf = self.config.get_var_tf()
-                get_github_storage().write(var_tf, self.hostname)
+                sha = get_github_storage().write(var_tf, self.hostname)
             except Exception as error:
-                self.delete()
                 raise PlanException(
                     "Could not write variables.tf on the storage backend.",
                     additional_details=f"hostname: {self.hostname}, error: {error}",
                 )
-            self.status = ClusterStatusCode.PLAN_RUNNING
+            self.create_plan(github_sha=sha)
             db.session.commit()
 
     def plan_destruction(self):
         logging.debug(f"Call <{self.__class__.__name__}:plan_destruction>")
-        tf = get_terraform_cloud()
-        run_id = tf.destroy_run(self.orm.tfcloud_workspace)
-        logging.info(
-            f"{self.hostname}: Apply destroy on workspace_id={self.orm.tfcloud_workspace} with run_id={run_id}"
-        )
-        self.status = ClusterStatusCode.DESTROY_RUNNING
-        db.session.commit()
+        if self.orm.tfcloud_workspace is None:
+            self.delete()
+        else:
+            tf = get_terraform_cloud()
+            run_id = tf.destroy_plan(self.orm.tfcloud_workspace)
+            logging.info(
+                f"{self.hostname}: Apply destroy on workspace_id={self.orm.tfcloud_workspace} with run_id={run_id}"
+            )
+            self.create_plan(run_id=run_id)
+            db.session.commit()
 
-    def create_plan(self):
+    def create_plan(self, github_sha=None, run_id=None):
         logging.debug(f"Call <{self.__class__.__name__}:create_plan>")
-        raise NotImplementedError
+        self.status = ClusterStatusCode.PLAN_RUNNING
+        self.tfcloud_run = TerraformCloudRunORM()
+
+        if github_sha is None and run_id is None:
+            raise InvalidPlanParameters
+
+        tf = get_terraform_cloud()
+        while run_id is None:
+            run_id = tf.get_run_by_commit(self.tfcloud_workspace, github_sha)
+            if run_id is None:
+                time.sleep(10)
+
+        # A previous planned/pending runs can block the current run from running.
+        # Force excecute the current run
+        tf.force_execute(run_id)
+
+        # Fetch lastest plan if currently empty
+        while not self.plan:
+            plan = tf.get_run_plan_log_json(run_id)
+            if plan is not None:
+                self.plan = plan
+                logging.info(f"Plan Updated for {run_id=}")
+            else:
+                time.sleep(10)
+
+        self.orm.tfcloud_run.run_id = run_id
 
     def delete(self):
         db.session.delete(self.orm)
         db.session.commit()
+
+    def apply(self):
+        if self.plan is None:
+            raise PlanNotCreatedException
+        if self.is_busy:
+            raise BusyClusterException
+        if self.tfcloud_run.run_id is None:
+            raise RunIDNotSet
+
+        tf = get_terraform_cloud()
+        tf.apply_run(self.tfcloud_run.run_id)

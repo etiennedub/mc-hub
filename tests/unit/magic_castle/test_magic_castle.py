@@ -111,30 +111,6 @@ def test_get_status_not_found(app):
     assert magic_castle2.orm.status == ClusterStatusCode.NOT_FOUND
 
 
-# def test_get_plan_type_destroy(app):
-#     from mchub.models.magic_castle.magic_castle import MagicCastle, MagicCastleORM
-#     from mchub.models.magic_castle.plan_type import PlanType
-#     from mchub.database import db
-#
-#     orm = db.session.scalar(
-#         db.select(MagicCastleORM).filter_by(hostname="valid1.magic-castle.cloud")
-#     )
-#     magic_castle = MagicCastle(orm=orm)
-#     assert magic_castle.plan_type == PlanType.DESTROY
-#
-#
-# def test_get_plan_type_none(app):
-#     from mchub.models.magic_castle.magic_castle import MagicCastle, MagicCastleORM
-#     from mchub.models.magic_castle.plan_type import PlanType
-#     from mchub.database import db
-#
-#     orm = db.session.scalar(
-#         db.select(MagicCastleORM).filter_by(hostname="missingfloatingips.mc.ca")
-#     )
-#     magic_castle = MagicCastle(orm=orm)
-#     assert magic_castle.plan_type == PlanType.NONE
-
-
 def test_config_valid(app):
     from mchub.models.magic_castle.magic_castle import MagicCastle, MagicCastleORM
     from mchub.database import db

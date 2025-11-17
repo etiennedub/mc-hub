@@ -39,6 +39,7 @@ def app(config_mock, generate_test_clusters):
     from mchub.models.magic_castle.magic_castle_configuration import (
         MagicCastleConfiguration,
     )
+    from mchub.models.terraform.terraform_state import TerraformState
     from mchub.models.magic_castle.magic_castle import MagicCastleORM
     from mchub.models.user import UserORM
 
@@ -91,11 +92,6 @@ def app(config_mock, generate_test_clusters):
         for key, data in CLUSTERS.items():
             hostname = key
             project = db.session.get(Project, data["cloud"]["id"])
-            main = path.join(
-                MOCK_CLUSTERS_PATH,
-                hostname,
-                "main.tf.json",
-            )
             state = path.join(
                 MOCK_CLUSTERS_PATH,
                 hostname,
@@ -106,6 +102,11 @@ def app(config_mock, generate_test_clusters):
                 hostname,
                 "terraform_plan.json",
             )
+            try:
+                with open(state) as file_:
+                    tf_state = TerraformState(json.load(file_))
+            except FileNotFoundError:
+                tf_state = None
             try:
                 config = MagicCastleConfiguration("", data)
             except FileNotFoundError:
@@ -122,7 +123,7 @@ def app(config_mock, generate_test_clusters):
                 expiration_date=data["expiration_date"],
                 config=config,
                 created=datetime(2022, 1, 1),
-                tfcloud_run=TerraformCloudRunORM(),
+                tfcloud_run=TerraformCloudRunORM(tf_state=tf_state, plan=plan),
             )
             db.session.add(cluster)
         db.session.commit()

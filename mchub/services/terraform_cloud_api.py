@@ -54,10 +54,10 @@ class TerraformCloud:
     def _request(self, method, url, **kwargs):
         return requests.request(method, url, headers=self.headers, **kwargs)
 
-    def destroy_run(self, workspace_id):
+    def destroy_plan(self, workspace_id):
         destroy_payload = {
             "data": {
-                "attributes": {"message": "Apply destroy", "is-destroy": True},
+                "attributes": {"message": "Plan destroy", "is-destroy": True},
                 "type": "runs",
                 "relationships": {
                     "workspace": {
@@ -114,8 +114,8 @@ class TerraformCloud:
                 "attributes": {
                     "name": workspace_name,
                     "execution-mode": "remote",
-                    "auto-apply": "true",
-                    "auto-apply-run-trigger": "true",
+                    "auto-apply": "false",
+                    "auto-apply-run-trigger": "false",
                     "file-triggers-enabled": "false",
                     "queue-all-runs": "true",
                     "vcs-repo": {
@@ -175,21 +175,39 @@ class TerraformCloud:
                 additional_details=f"{self.organisation_name=}, {project_name=} vars={[v.name for v in variables]}, error: {res.text}",
             )
 
-    def get_lastest_run_status(self, workspace_id):
+    def get_run_status(self, run_id):
+        url = f"{self.BASE_URL}/runs/{run_id}"
+        res = self._request("GET", url)
+        if res.status_code == 200:
+            try:
+                status = res.json()["data"]["attributes"]["status"]
+                is_destroy = res.json()["data"]["attributes"]["is-destroy"]
+                return TFCloudStatusCode(status), is_destroy
+            except IndexError:
+                # No run found
+                return None, None
+
+        else:
+            raise TerraformCloudException(
+                "Could not find trigger run",
+                additional_details=f"{run_id=}, error: {res.text}",
+            )
+
+    def get_run_by_commit(self, workspace_id, github_sha):
         url = f"{self.BASE_URL}/workspaces/{workspace_id}/runs"
         params = {
             "page[size]": 1,  # Limit to the most recent run
         }
+        params["search[commit]"] = github_sha
+
         res = self._request("GET", url, params=params)
         if res.status_code == 200:
             try:
-                status = res.json()["data"][0]["attributes"]["status"]
-                is_detroy = res.json()["data"][0]["attributes"]["is-destroy"]
                 run_id = res.json()["data"][0]["id"]
-                return run_id, TFCloudStatusCode(status), is_detroy
+                return run_id
             except IndexError:
                 # No run found
-                return None, None, None
+                return None
 
         else:
             raise TerraformCloudException(
@@ -266,6 +284,27 @@ class TerraformCloud:
                 "Invalid workspace to retrive state",
                 additional_details=f"{workspace_id=}, error: {res.text}",
             )
+
+    def apply_run(self, run_id):
+        url = f"{self.BASE_URL}/runs/{run_id}/actions/apply"
+        res = self._request("POST", url)
+        if res.status_code != 202:
+            raise TerraformCloudException(
+                "Could not apply run",
+                additional_details=f"{run_id=}, error: {res.text}",
+            )
+
+    def force_execute(self, run_id):
+        url = f"{self.BASE_URL}/runs/{run_id}/actions/force-execute"
+        res = self._request("POST", url)
+        match res.status_code:
+            case 202 | 403:  # 403 is the case where the run is not in pending state
+                return
+            case _:
+                raise TerraformCloudException(
+                    "Invalid Error for force_execute",
+                    additional_details=f"{run_id=}, error: {res.text}",
+                )
 
 
 _terraform_cloud_instance = None

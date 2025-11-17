@@ -28,6 +28,7 @@ class ClusterStatusCode(str, Enum):
         ClusterStatusCode.BUILD_ERROR
         ClusterStatusCode.PROVISIONING_ERROR
         """
+        print(tf_status)
         match tf_status:
             case (
                 TFCloudStatusCode.PENDING
@@ -49,14 +50,11 @@ class ClusterStatusCode(str, Enum):
                 # TODO: When an error occur, we can fetch the plan and apply to know the corresponding step.
                 # For now, all errors are return as PLAN_ERROR
                 status = ClusterStatusCode.PLAN_ERROR
-            case (
-                TFCloudStatusCode.PLANNED_AND_SAVED
-                | TFCloudStatusCode.PLANNED
-                | TFCloudStatusCode.APPLY_QUEUED
-            ):
+            case TFCloudStatusCode.PLANNED_AND_SAVED | TFCloudStatusCode.PLANNED:
                 status = ClusterStatusCode.CREATED
             case (
                 TFCloudStatusCode.APPLYING
+                | TFCloudStatusCode.APPLY_QUEUED
                 | TFCloudStatusCode.COST_ESTIMATING
                 | TFCloudStatusCode.COST_ESTIMATED
                 | TFCloudStatusCode.POLICY_CHECKING
@@ -76,13 +74,13 @@ class ClusterStatusCode(str, Enum):
             case _:
                 status = ClusterStatusCode.NOT_FOUND
 
-        if is_detroy:  # Extra step for destroy case
+        if (
+            is_detroy
+        ):  # Extra step for destroy case (use only ClusterStatusCode from here)
             match status:
-                case (
-                    ClusterStatusCode.PLAN_RUNNING
-                    | ClusterStatusCode.BUILD_RUNNING
-                    | ClusterStatusCode.CREATED
-                ):
+                case ClusterStatusCode.PLAN_RUNNING | ClusterStatusCode.CREATED:
+                    pass
+                case ClusterStatusCode.BUILD_RUNNING:
                     status = ClusterStatusCode.DESTROY_RUNNING
                 case ClusterStatusCode.PROVISIONING_RUNNING:
                     status = ClusterStatusCode.DESTROY_SUCCESS
